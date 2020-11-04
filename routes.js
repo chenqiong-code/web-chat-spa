@@ -12,17 +12,52 @@
 
 // ------------ BEGIN MODULE SCOPE VARIABLES --------------
 'use strict';
-var configRoutes,
-    mongodb      =  require('mongodb'),
-    mongoServer  =  new mongodb.Server('localhost', mongodb.Connection.DEFAULT_PORT),
-    dbHandle     =  new mongodb.Db(
-      'spa', mongoServer, { safe: true }
-    );
-    dbHandle.open(function() {
-      console.log('** Connected to MongoDB **');
-    })
+
+const { query, request } = require('express');
+const { ObjectID } = require('mongodb');
+
+var
+  loadSchema,
+  configRoutes, 
+  db,
+  checkSchema,
+  objTypeMap = { 'user': {}},
+  fsHandler = require('fs'),
+  JSV = require('JSV').JSV,
+  validator = JSV.createEnvironment();
+const
+    MongoClient =  require( 'mongodb' ).MongoClient,
+    url         = 'mongodb://localhost:27017',
+    client      = new MongoClient(url);
+    
+    client.connect( function ( error, client ) {
+      if(error) {
+        console.log('client can\'t connect to server')
+      }else {
+        db = client.db('spa');
+        console.log('client connect to server');
+      }
+    });
+
 
 // ------------- END MODULE SCOPE VARIABLES ---------------
+
+// ---------------- BEGIN UTILITY METHODS ------------------
+    loadSchema = function( schema_name, schema_path ) {
+      fsHandler.readFile(schema_path, 'utf8', function(error, data) {
+        objTypeMap[schema_name] = JSON.parse(data);
+      })
+    };
+
+    
+    checkSchema = function ( obj_type, obj_map, callback ) {
+      var
+        schema_map = objTypeMap[ obj_type ],
+        report_map = validator.validate( obj_map, schema_map );
+
+      callback( report_map.errors );
+    };
+// ---------------- BEGIN UTILITY METHODS ------------------
 
 // ---------------- BEGIN PUBLIC METHODS ------------------
 configRoutes = function ( app, server ) {
@@ -32,44 +67,127 @@ configRoutes = function ( app, server ) {
 
   app.all( '/:obj_type/*?', function ( request, response, next ) {
     response.contentType( 'json' );
-    next();
+    if( objTypeMap[ request.params.obj_type ]) {
+      next();
+    }else {
+      response.send({error_msg: request.params.obj_type + 'is not a valid object type'});
+    }
   });
 
   app.get( '/:obj_type/list', function ( request, response ) {
-    response.send({ title: request.params.obj_type + ' list' });
+    db.collection(
+      request.params.obj_type,
+      function (outer_error, collection) {
+        collection.find().toArray(
+          function(inner_error, array){
+            response.send(array);
+          }
+        )
+      }
+    );
   });
 
   app.post( '/:obj_type/create', function ( request, response ) {
-    response.send({ title: request.params.obj_type + ' created' });
+    var 
+      obj_type = request.params.obj_type,
+      obj_map  =  request.body;
+checkSchema(
+  obj_type, obj_map,
+  function(error_list) {
+    if(error_list.length === 0) {
+      db.collection(
+        obj_type,
+        function (outer_error, collection) {
+            collection.insertOne( obj_map ).then(
+              function ( result_map ) {
+                response.send( result_map );
+            });
+        }
+      );
+    }else {
+      response.send({
+        error_msg: 'Input document not valid',
+        error_list: error_list
+      })
+    }
+  }
+)
   });
 
-  app.get( '/:obj_type/read/:id([0-9]+)',
+  app.get( '/:obj_type/read/:id',
     function ( request, response ) {
-      response.send({
-        title: request.params.obj_type
-          + ' with id ' + request.params.id + ' found'
-      });
+      var find_map = { _id : ObjectID( request.params.id )};
+      db.collection(
+        request.params.obj_type,
+        function(outter_error, collection ) {
+          collection.findOne(
+            find_map,
+            function( inner_error, result_map ) {
+              response.send( result_map );
+            }
+          )
+        }
+      )
     }
   );
 
-  app.post( '/:obj_type/update/:id([0-9]+)',
+  app.post( '/:obj_type/update/:id',
     function ( request, response ) {
-      response.send({
-        title: request.params.obj_type
-          + ' with id ' + request.params.id + ' updated'
-      });
+      var 
+        find_map = { _id : ObjectID( request.params.id )},
+        obj_map  = request.body;
+
+      db.collection(
+        request.params.obj_type,
+        function ( outter_error, collection ) {
+          var
+            sort_order = [],
+            options_map = {
+              'new': true, upset: false, safe: true
+            };
+
+            collection.findAndModify(
+              find_map,
+              sort_order,
+              obj_map,
+              options_map,
+              function ( inner_error, result_map ) {
+                response.send( result_map );
+              }
+            )
+        }
+      )
     }
   );
 
-  app.get( '/:obj_type/delete/:id([0-9]+)',
+  app.get( '/:obj_type/delete/:id',
     function ( request, response ) {
-      response.send({
-        title: request.params.obj_type
-          + ' with id ' + request.params.id + ' deleted'
-      });
+      var find_map = { _id : ObjectID(request.params.id) }
+      db.collection(
+        request.params.obj_type,
+        function ( outter_error, collection ) {
+          collection.remove(
+            find_map,
+            {
+              justOne: false
+            },
+            function( inner_error, delete_count ) {
+              response.send({delete_count: delete_count})
+            }
+          )
+        }
+      )
     }
   );
 };
 
 module.exports = { configRoutes : configRoutes };
 // ----------------- END PUBLIC METHODS -------------------
+
+(function() {
+  var schema_name, schema_path;
+  for(schema_name in objTypeMap) {
+    schema_path = __dirname + '/' + schema_name + '.json';
+    loadSchema( schema_name, schema_path );
+  }
+})();
